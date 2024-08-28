@@ -1,12 +1,27 @@
 import { Message as DiscordMessage } from "discord.js";
 import { ProcessedMessage } from "../types/index";
+import { Bot } from "../models/Bots";
 
-export function processMessages(
+export async function processMessages(
   messages: DiscordMessage[],
-  systemPrompt: string
-): ProcessedMessage[] {
+  systemPrompt: string,
+  botNames: string[],
+  currentBotName: string
+): Promise<ProcessedMessage[]> {
+  const botMentions = await Promise.all(
+    botNames.map(
+      async (name) => `${name} (${await Bot.getBotMentionByName(name)})`
+    )
+  );
   const processedMessages: ProcessedMessage[] = [
-    { role: "system", content: systemPrompt },
+    {
+      role: "system",
+      content: `${systemPrompt}\n\nYou are ${currentBotName} (${await Bot.getBotMentionByName(
+        currentBotName
+      )}).\nOther bots in the conversation: ${botMentions.join(
+        ", "
+      )}\nWhen mentioning other bots, use their full mention string.`,
+    },
   ];
 
   messages.forEach((message) => {
@@ -20,7 +35,6 @@ export function processMessages(
       );
       if (imageAttachments.size > 0) {
         content += "\n[Image attachée]";
-        // Vous pouvez ajouter ici la logique pour traiter les images si nécessaire
       }
     }
 

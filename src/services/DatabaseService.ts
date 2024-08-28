@@ -1,7 +1,7 @@
-import sqlite3 from 'sqlite3';
-import { config } from '../config/config';
-import { Conversation, Message } from '../models/Conversation';
-import { Memory } from '../models/Memory';
+import sqlite3 from "sqlite3";
+import { config } from "../config/config";
+import { Conversation, Message } from "../models/Conversation";
+import { Memory } from "../models/Memory";
 
 export class DatabaseService {
   private db: sqlite3.Database;
@@ -38,6 +38,13 @@ export class DatabaseService {
         memories TEXT
       )
     `);
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS bot_ids (
+        bot_name TEXT PRIMARY KEY,
+        bot_id TEXT
+      )
+    `);
   }
 
   public async getOrCreateConversation(
@@ -50,7 +57,8 @@ export class DatabaseService {
       this.db.get(
         "SELECT * FROM conversations WHERE user_id = ? AND bot_id = ? AND guild_id = ? AND channel_id = ?",
         [userId, botId, guildId, channelId],
-        (err, row) => {
+        (err, row: any) => {
+          // Ajout du type 'any' pour row
           if (err) {
             reject(err);
           } else if (row) {
@@ -60,7 +68,9 @@ export class DatabaseService {
               guildId,
               channelId
             );
-            conversation.getMessages().push(...JSON.parse(row.messages));
+            conversation
+              .getMessages()
+              .push(...JSON.parse(row.messages || "[]"));
             resolve(conversation);
           } else {
             const conversation = new Conversation(
@@ -109,12 +119,13 @@ export class DatabaseService {
       this.db.get(
         "SELECT * FROM memories WHERE bot_id = ? AND guild_id = ? AND channel_id = ?",
         [botId, guildId, channelId],
-        (err, row) => {
+        (err, row: any) => {
+          // Ajout du type 'any' pour row
           if (err) {
             reject(err);
           } else if (row) {
             const memory = new Memory(botId, guildId, channelId);
-            memory.getMemories().push(...JSON.parse(row.memories));
+            memory.getMemories().push(...JSON.parse(row.memories || "[]"));
             resolve(memory);
           } else {
             const memory = new Memory(botId, guildId, channelId);
@@ -142,6 +153,38 @@ export class DatabaseService {
             reject(err);
           } else {
             resolve();
+          }
+        }
+      );
+    });
+  }
+
+  public async saveBotId(botName: string, botId: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.db.run(
+        "INSERT OR REPLACE INTO bot_ids (bot_name, bot_id) VALUES (?, ?)",
+        [botName, botId],
+        (err) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve();
+          }
+        }
+      );
+    });
+  }
+
+  public async getBotId(botName: string): Promise<string | null> {
+    return new Promise((resolve, reject) => {
+      this.db.get(
+        "SELECT bot_id FROM bot_ids WHERE bot_name = ?",
+        [botName],
+        (err, row: any) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(row ? row.bot_id : null);
           }
         }
       );
