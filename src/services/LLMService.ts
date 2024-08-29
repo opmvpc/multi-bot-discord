@@ -41,28 +41,22 @@ export class LLMService {
     }
   }
 
-  private cleanLLMResponse(response: string): string {
-    // Retire les backticks et les indicateurs de langage JSON
-    let cleaned = response.replace(/```json\s*|\s*```/g, "");
-
-    // Retire les commentaires potentiels
-    cleaned = cleaned
-      .replace(/\/\*[\s\S]*?\*\/|([^\\:]|^)\/\/.*$/gm, "$1")
-      .trim();
-
-    return cleaned;
-  }
-
   private cleanApiResponse(response: any): string {
-    let content = '';
+    let content = "";
 
-    if (response && response.choices && response.choices[0] && response.choices[0].message) {
+    if (
+      response &&
+      response.choices &&
+      response.choices[0] &&
+      response.choices[0].message
+    ) {
       content = response.choices[0].message.content;
-    } else if (typeof response === 'string') {
-      content = response;
     } else {
-      console.warn('Unexpected API response structure:', JSON.stringify(response));
-      return '{}'; // Retourne un objet JSON vide en cas de structure inattendue
+      console.warn(
+        "Unexpected API response structure:",
+        JSON.stringify(response)
+      );
+      return "{}"; // Retourne un objet JSON vide en cas de structure inattendue
     }
 
     // Essaie d'extraire l'objet JSON de la chaîne de caractères
@@ -83,6 +77,7 @@ export class LLMService {
   ): Promise<LLMResponseType | null> {
     const maxAttempts = 5;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      let parsedResponse: any = null;
       try {
         const apiResponse = await this.callAPI(messages, llmConfig);
         console.log("API response:", JSON.stringify(apiResponse));
@@ -90,17 +85,14 @@ export class LLMService {
         const cleanedResponse = this.cleanApiResponse(apiResponse);
         console.log("Cleaned API response:", cleanedResponse);
 
-        let parsedResponse;
         try {
           parsedResponse = JSON.parse(cleanedResponse);
         } catch (parseError) {
           console.error("Error parsing JSON:", parseError);
-          parsedResponse = {
-            reflection: cleanedResponse,
-            shouldRespond: true,
-            reason: "Direct response",
-            response: cleanedResponse,
-          };
+          const errorMessage = `Erreur : La réponse n'est pas un JSON valide. Votre réponse DOIT être UNIQUEMENT un objet JSON valide avec la structure spécifiée, sans aucun texte supplémentaire. Réessayez.`;
+          messages.push({ role: "assistant", content: cleanedResponse });
+          messages.push({ role: "user", content: errorMessage });
+          continue;
         }
 
         const validatedResponse = LLMResponseSchema.parse(parsedResponse);
@@ -114,9 +106,13 @@ export class LLMService {
             console.error("Path:", err.path.join("."));
             console.error("Code:", err.code);
           });
-          const errorMessage = `Erreur de validation JSON. Veuillez corriger : ${error.errors
-            .map((e) => e.message)
-            .join(", ")}`;
+          const errorMessage = `Erreur : La réponse ne respecte pas le schéma attendu. Assurez-vous d'inclure tous les champs requis (reflection, shouldRespond, reason, response) et qu'ils sont du bon type. Réessayez avec un JSON valide.`;
+          if (parsedResponse !== null) {
+            messages.push({
+              role: "assistant",
+              content: JSON.stringify(parsedResponse),
+            });
+          }
           messages.push({ role: "user", content: errorMessage });
         } else {
           console.error("Unexpected error:", error);
@@ -124,35 +120,56 @@ export class LLMService {
         }
       }
     }
-    console.error(
-      "Failed to get a valid response after",
-      maxAttempts,
-      "attempts"
-    );
     return null;
   }
 
   public async processMessage(
     llmConfig: LLMConfig,
     messages: ProcessedMessage[],
-    memory: Memory
+    memory: Memory,
+    botNames: string[]
   ): Promise<LLMResponse | null> {
     const systemPrompt = `
-Vous êtes un assistant IA analysant des conversations en français. Suivez ces étapes :
-1. Réfléchissez à la conversation et au dernier message.
-2. Décidez si une réponse est nécessaire.
-3. Si une réponse est nécessaire, formulez-en une en français.
+You are an AI assistant in a multi-bot conversation. Always respond in JSON format and mention other bots using their full mention (e.g., @Llama Bot#0402).
 
-Votre réponse DOIT être un objet JSON valide avec la structure suivante :
+Available bots in this conversation:
+${botNames.map(name => `@${name}`).join(', ')}
+
+IMPORTANT:
+- The conversation history includes prefixes like "@Bot Name#1234:" before each message. These are added to help you understand the context. DO NOT include these prefixes in your response.
+- ALWAYS respond using the following JSON structure:
 {
   "reflection": string,
   "shouldRespond": boolean,
   "reason": string,
-  "response": string (seulement si shouldRespond est true)
+  "response": string
 }
-N'incluez aucun texte en dehors de l'objet JSON.
+- The "response" field must always be present, even if empty when shouldRespond is false.
+- When responding, ALWAYS mention other bots using their full mention (e.g., @Llama Bot#0402) in the "response" field.
+- NEVER use plain text responses outside of the JSON structure.
+- DO NOT add your own name or mention at the beginning of your response.
 
-Mémoire : ${memory.getMemories().join("\n")}`;
+Example conversation with different AI assistants:
+@GPT-4#1111: {
+  "reflection": "The user asked about the latest advancements in quantum computing.",
+  "shouldRespond": true,
+  "reason": "We should provide information on recent quantum computing developments.",
+  "response": "@Claude-3#2222, could you share any recent breakthroughs in quantum computing you're aware of?"
+}
+@Claude-3#2222: {
+  "reflection": "@GPT-4#1111 asked about recent quantum computing breakthroughs.",
+  "shouldRespond": true,
+  "reason": "I can provide information on recent quantum computing advancements.",
+  "response": "@GPT-4#1111, certainly! A recent breakthrough is the development of a 127-qubit quantum computer by IBM, which marks a significant step towards quantum advantage."
+}
+@GPT-4#1111: {
+  "reflection": "@Claude-3#2222 provided information on a recent quantum computing breakthrough.",
+  "shouldRespond": true,
+  "reason": "I should acknowledge the information and continue the discussion.",
+  "response": "Thank you, @Claude-3#2222! That's fascinating. @User#3333, given this advancement, what potential applications of quantum computing are you most excited about?"
+}
+
+Memory: ${memory.getMemories().join("\n")}`;
 
     const systemMessage: ProcessedMessage = {
       role: "system",
@@ -168,18 +185,18 @@ Mémoire : ${memory.getMemories().join("\n")}`;
 
     if (!validatedResponse) {
       console.error(
-        "Échec de l'obtention d'une réponse valide après plusieurs tentatives."
+        "Failed to obtain a valid response after multiple attempts."
       );
       return {
         type: "text",
         content:
-          "Je suis désolé, j'ai rencontré des difficultés à formuler une réponse appropriée. Pouvez-vous reformuler votre question ?",
+          "I'm sorry, I encountered difficulties formulating an appropriate response. Can you rephrase your question?",
       };
     }
 
     if (!validatedResponse.shouldRespond) {
       console.log(
-        "Décision de ne pas répondre. Raison :",
+        "Decision not to respond. Reason:",
         validatedResponse.reason
       );
       return null;
@@ -189,7 +206,7 @@ Mémoire : ${memory.getMemories().join("\n")}`;
       type: "text",
       content:
         validatedResponse.response ||
-        "Je suis désolé, je n'ai pas de réponse appropriée à ce moment.",
+        "I'm sorry, I don't have an appropriate response at this time.",
     };
   }
 

@@ -88,24 +88,37 @@ export class Bot {
     const response = await this.llmService.processMessage(
       this.botConfig.llm,
       processedMessages,
-      memory
+      memory,
+      config.bots.map((bot) => bot.name)
     );
 
-    // Ajout de la logique d'envoi de message
     if (response && response.content) {
+      const otherBotName = config.bots.find(
+        (bot) => bot.name !== this.getName()
+      )?.name;
+      if (
+        otherBotName &&
+        !this.verifyBotMention(response.content, otherBotName)
+      ) {
+        console.log(
+          `Le bot n'a pas mentionné correctement l'autre bot (${otherBotName}). Ignoré.`
+        );
+        return;
+      }
+
       await message.channel.send(response.content);
-    }
 
-    // Mise à jour de la conversation et de la mémoire
-    conversation.addMessage({
-      role: "assistant",
-      content: response?.content || "",
-    });
-    await Bot.dbService.saveConversation(conversation);
+      // Mise à jour de la conversation et de la mémoire
+      conversation.addMessage({
+        role: "assistant",
+        content: response.content,
+      });
+      await Bot.dbService.saveConversation(conversation);
 
-    if (response && response.content) {
       memory.addMemory(response.content);
       await Bot.dbService.saveMemory(memory);
+    } else {
+      console.log("Le bot a décidé de ne pas répondre.");
     }
   }
 
@@ -148,5 +161,12 @@ export class Bot {
         logger.error(`Failed to update bot name: ${error}`);
       }
     }
+  }
+
+  private verifyBotMention(response: string, otherBotName: string): boolean {
+    console.log(`Verifying mention of ${otherBotName} in response: ${response}`);
+    const mentionRegex = new RegExp(`@${otherBotName}|<@!?\\d+>`, "i");
+    console.log(`Mention verification result: ${mentionRegex.test(response)}`);
+    return mentionRegex.test(response);
   }
 }
