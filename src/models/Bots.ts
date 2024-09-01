@@ -11,6 +11,7 @@ import { Memory } from "./Memory";
 import { processMessages } from "../utils/prompts";
 import { LLMConfig, BotConfig, config } from "../config/config";
 import { logger } from "../utils/logger";
+import { ProcessedMessage } from "../types/index"; // Ajoutez cette ligne
 
 export class Bot {
   private client: Client;
@@ -60,7 +61,14 @@ export class Bot {
   }
 
   public async handleMessage(message: DiscordMessage): Promise<void> {
-    if (message.author.bot || !message.guild) return;
+    if (!message.guild || message.author.id === this.client.user?.id) return;
+
+    // Ajout d'un délai initial aléatoire entre 3 et 5 secondes
+    await this.delay(Math.floor(Math.random() * 2000) + 3000);
+
+    console.log(
+      `[${new Date().toISOString()}] ${this.getName()} is processing a message.`
+    );
 
     const conversation = await Bot.dbService.getOrCreateConversation(
       message.author.id,
@@ -85,41 +93,50 @@ export class Bot {
       this.getName()
     );
 
-    const response = await this.llmService.processMessage(
-      this.botConfig.llm,
-      processedMessages,
-      memory,
-      config.bots.map((bot) => bot.name)
-    );
+    const shouldRespond = this.decideIfShouldRespond(message, processedMessages);
 
-    if (response && response.content) {
-      const otherBotName = config.bots.find(
-        (bot) => bot.name !== this.getName()
-      )?.name;
-      if (
-        otherBotName &&
-        !this.verifyBotMention(response.content, otherBotName)
-      ) {
-        console.log(
-          `Le bot n'a pas mentionné correctement l'autre bot (${otherBotName}). Ignoré.`
-        );
-        return;
+    if (shouldRespond) {
+      const llmResponse = await this.llmService.processMessage(
+        this.getLLMConfig(),
+        processedMessages,
+        memory,
+        this.getAllBotNames()
+      );
+
+      if (llmResponse && llmResponse.content) {
+        const otherBotName = config.bots.find(
+          (bot) => bot.name !== this.getName()
+        )?.name;
+        if (
+          otherBotName &&
+          !this.verifyBotMention(llmResponse.content, otherBotName)
+        ) {
+          console.log(
+            `Warning: Bot didn't mention the other bot (${otherBotName}) correctly. Continuing anyway.`
+          );
+        }
+
+        await message.channel.send(llmResponse.content);
+
+        // Mise à jour de la conversation et de la mémoire
+        conversation.addMessage({
+          role: "assistant",
+          content: llmResponse.content,
+        });
+        await Bot.dbService.saveConversation(conversation);
+
+        memory.addMemory(llmResponse.content);
+        await Bot.dbService.saveMemory(memory);
+      } else {
+        console.log("Le LLM n'a pas fourni de réponse valide.");
       }
-
-      await message.channel.send(response.content);
-
-      // Mise à jour de la conversation et de la mémoire
-      conversation.addMessage({
-        role: "assistant",
-        content: response.content,
-      });
-      await Bot.dbService.saveConversation(conversation);
-
-      memory.addMemory(response.content);
-      await Bot.dbService.saveMemory(memory);
     } else {
       console.log("Le bot a décidé de ne pas répondre.");
     }
+  }
+
+  private async delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   private async getRecentMessages(
@@ -164,9 +181,24 @@ export class Bot {
   }
 
   private verifyBotMention(response: string, otherBotName: string): boolean {
-    console.log(`Verifying mention of ${otherBotName} in response: ${response}`);
+    console.log(
+      `Verifying mention of ${otherBotName} in response: ${response}`
+    );
     const mentionRegex = new RegExp(`@${otherBotName}|<@!?\\d+>`, "i");
     console.log(`Mention verification result: ${mentionRegex.test(response)}`);
     return mentionRegex.test(response);
+  }
+
+  private decideIfShouldRespond(message: DiscordMessage, processedMessages: ProcessedMessage[]): boolean {
+    // Si le message mentionne explicitement ce bot, toujours répondre
+    if (message.mentions.has(this.client.user!)) return true;
+
+    // Si le message provient d'un utilisateur, toujours répondre
+    if (!message.author.bot) return true;
+
+    // Si le message provient d'un autre bot, décider en fonction du contenu
+    // Par exemple, répondre si le message pose une question ou mentionne ce bot par son nom
+    const content = message.content.toLowerCase();
+    return content.includes('?') || content.includes(this.getName().toLowerCase());
   }
 }

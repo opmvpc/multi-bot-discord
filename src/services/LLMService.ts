@@ -4,6 +4,7 @@ import { Message } from "../models/Conversation";
 import { Memory } from "../models/Memory";
 import { LLMResponse, ProcessedMessage } from "../types/index";
 import { z } from "zod";
+import { RateLimiter } from '../utils/RateLimiter';
 
 const LLMResponseSchema = z.object({
   reflection: z.string(),
@@ -16,6 +17,11 @@ type LLMResponseType = z.infer<typeof LLMResponseSchema>;
 
 export class LLMService {
   private readonly API_URL = "https://openrouter.ai/api/v1/chat/completions";
+  private rateLimiter: RateLimiter;
+
+  constructor() {
+    this.rateLimiter = new RateLimiter();
+  }
 
   private async callAPI(messages: any[], llmConfig: LLMConfig): Promise<any> {
     try {
@@ -36,7 +42,20 @@ export class LLMService {
 
       return response.data;
     } catch (error) {
-      console.error("Error calling API:", error);
+      if (axios.isAxiosError(error) && error.response) {
+        console.error("Error calling API:", error.message);
+        console.error("Status code:", error.response.status);
+        console.error("Error details:", error.response.data);
+        if (error.response.data && error.response.data.error) {
+          console.error(
+            "API error message:",
+            error.response.data.error.message
+          );
+          console.error("API error type:", error.response.data.error.type);
+        }
+      } else {
+        console.error("Unexpected error:", error);
+      }
       throw error;
     }
   }
@@ -77,7 +96,8 @@ export class LLMService {
   ): Promise<LLMResponseType | null> {
     const maxAttempts = 5;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      let parsedResponse: any = null;
+      console.log(`Attempt ${attempt} to get validated response`);
+      let parsedResponse: any;
       try {
         const apiResponse = await this.callAPI(messages, llmConfig);
         console.log("API response:", JSON.stringify(apiResponse));
@@ -116,10 +136,10 @@ export class LLMService {
           messages.push({ role: "user", content: errorMessage });
         } else {
           console.error("Unexpected error:", error);
-          return null;
         }
       }
     }
+    console.error("Failed to obtain a valid response after multiple attempts");
     return null;
   }
 
@@ -129,11 +149,13 @@ export class LLMService {
     memory: Memory,
     botNames: string[]
   ): Promise<LLMResponse | null> {
+    await this.rateLimiter.waitForNextRequest();
+
     const systemPrompt = `
 You are an AI assistant in a multi-bot conversation. Always respond in JSON format and mention other bots using their full mention (e.g., @Llama Bot#0402).
 
 Available bots in this conversation:
-${botNames.map(name => `@${name}`).join(', ')}
+${botNames.map((name) => `@${name}`).join(", ")}
 
 IMPORTANT:
 - The conversation history includes prefixes like "@Bot Name#1234:" before each message. These are added to help you understand the context. DO NOT include these prefixes in your response.
@@ -195,10 +217,7 @@ Memory: ${memory.getMemories().join("\n")}`;
     }
 
     if (!validatedResponse.shouldRespond) {
-      console.log(
-        "Decision not to respond. Reason:",
-        validatedResponse.reason
-      );
+      console.log("Decision not to respond. Reason:", validatedResponse.reason);
       return null;
     }
 
